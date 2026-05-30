@@ -20,10 +20,24 @@ const POKEMON_FIELDS = ['picture', 'type', 'generation'];
 // facet values so the Type/Generation facets and pictures stay clean.
 const SOURCE_FILTER = '@source=="push API solution"';
 
+// Credentials are read from environment variables so they are never committed to
+// source control. They use the NEXT_PUBLIC_ prefix because the search token must
+// be available in the browser to hydrate the client-side Coveo engine.
+// Define these in a local `.env.local` file (see `.env.example`).
+const organizationId = process.env.NEXT_PUBLIC_COVEO_ORG_ID;
+const accessToken = process.env.NEXT_PUBLIC_COVEO_ACCESS_TOKEN;
+
+if (!organizationId || !accessToken) {
+  throw new Error(
+    'Missing Coveo configuration. Set NEXT_PUBLIC_COVEO_ORG_ID and ' +
+      'NEXT_PUBLIC_COVEO_ACCESS_TOKEN in your .env.local file.'
+  );
+}
+
 export const engineDefinition = defineSearchEngine({
   configuration: {
-    organizationId: 'mrzikora632mb41x',
-    accessToken: 'REMOVED_ROTATED_TOKEN',
+    organizationId,
+    accessToken,
     analytics: {enabled: true},
     preprocessRequest: (request, clientOrigin) => {
       if (clientOrigin === 'searchApiFetch' && typeof request.body === 'string') {

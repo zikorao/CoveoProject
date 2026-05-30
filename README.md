@@ -25,10 +25,20 @@ and server-side rendering.
 
 ```bash
 npm install
+cp .env.example .env.local   # then fill in your Coveo credentials
 npm run dev
 ```
 
 Then open [http://localhost:3000](http://localhost:3000).
+
+### Environment variables
+
+Create a `.env.local` file (gitignored) with your Coveo credentials:
+
+| Variable | Description |
+| --- | --- |
+| `NEXT_PUBLIC_COVEO_ORG_ID` | Your Coveo organization id |
+| `NEXT_PUBLIC_COVEO_ACCESS_TOKEN` | A search-scoped (low-privilege) access token |
 
 ## Project structure
 
@@ -57,7 +67,8 @@ python3 scripts/push_pokemon.py
 
 ## Configuration
 
-The Coveo `organizationId` and search `accessToken` are configured in
-`lib/engine.ts`. The search token is a public, browser-exposed token (standard for
-client-side Coveo apps); for production, consider serving it via an environment
-variable and restricting its privileges.
+The Coveo `organizationId` and search `accessToken` are read from environment
+variables in `lib/engine.ts` (see [Environment variables](#environment-variables)),
+so no credentials are committed to source control. The search token is exposed to
+the browser (standard for client-side Coveo apps), so use a search-scoped,
+low-privilege token.
