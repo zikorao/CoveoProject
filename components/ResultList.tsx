@@ -13,6 +13,12 @@ function toGeneration(raw: unknown): string | null {
   return value ? String(value) : null;
 }
 
+// The pushed clickUri looks like https://pokemondb.net/pokedex/<slug>.
+// Use the trailing slug to link to our internal detail page.
+function toSlug(clickUri: string): string {
+  return clickUri.split('?')[0].split('#')[0].replace(/\/$/, '').split('/').pop() ?? '';
+}
+
 export function ResultList() {
   const {state} = useResultList();
 
@@ -31,10 +37,11 @@ export function ResultList() {
         const picture = result.raw.picture as string | undefined;
         const types = toTypes(result.raw.type);
         const generation = toGeneration(result.raw.generation);
+        const slug = toSlug(result.clickUri);
 
         return (
           <li key={result.uniqueId}>
-            <a className="product-card" href={result.clickUri}>
+            <a className="product-card" href={`/pokemon/${slug}`}>
               <div className="product-media">
                 {generation ? (
                   <span className="gen-badge">Gen {generation}</span>

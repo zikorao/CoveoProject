@@ -18,7 +18,7 @@ const POKEMON_FIELDS = ['picture', 'type', 'generation'];
 // Restrict every search to the clean PokeAPI push source. This excludes the
 // older web-crawl source, preventing duplicate results and HTML-polluted
 // facet values so the Type/Generation facets and pictures stay clean.
-const SOURCE_FILTER = '@source=="push API solution"';
+export const SOURCE_FILTER = '@source=="push API solution"';
 
 // Credentials are read from environment variables so they are never committed to
 // source control. They use the NEXT_PUBLIC_ prefix because the search token must
@@ -49,7 +49,7 @@ export const engineDefinition = defineSearchEngine({
     },
   },
   controllers: {
-    searchBox: defineSearchBox(),
+    searchBox: defineSearchBox({options: {numberOfSuggestions: 8}}),
     resultList: defineResultList({
       options: {fieldsToInclude: POKEMON_FIELDS},
     }),
