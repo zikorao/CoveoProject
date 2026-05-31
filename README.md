@@ -5,6 +5,9 @@ the **Coveo Headless React** library. It searches a Coveo index of Pokemon and
 presents them as a browsable product catalog with faceted filtering, pagination,
 and server-side rendering.
 
+> Full design notes and a presentation deck live in [`docs/`](docs/) -
+> see [`docs/SOLUTION.md`](docs/SOLUTION.md) and [`docs/SLIDES.md`](docs/SLIDES.md).
+
 ## Features
 
 - **Search-as-you-type** search box powered by Coveo Headless.
