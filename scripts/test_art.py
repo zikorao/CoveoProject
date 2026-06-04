@@ -82,7 +82,10 @@ def main():
 
     checks = [
         ("Search API reachable", True),
-        ("Pipeline = default", d.get("pipeline") == "default"),
+        (
+            "Pipeline = pokemon-zikora",
+            d.get("pipeline") == "Search pipeline - pokemon-zikora",
+        ),
         ("Results for 'pikachu'", (d.get("totalCount") or 0) >= 1),
         ("ART QRE boost on top result (QRE > 0)", has_qre),
         ("rankingExpressions in response", bool(d.get("rankingExpressions"))),

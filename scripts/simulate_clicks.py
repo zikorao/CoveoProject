@@ -112,7 +112,7 @@ def search_and_click(title):
             search_body = {
                 "language": "en",
                 "userAgent": "Mozilla/5.0 (simulated ART training)",
-                "originLevel1": "default",
+                "originLevel1": "pokemon-zikora",
                 "originLevel2": "default",
                 "originLevel3": "localhost",
                 "queryText": title,
@@ -133,7 +133,7 @@ def search_and_click(title):
             click_body = {
                 "language": "en",
                 "userAgent": "Mozilla/5.0 (simulated ART training)",
-                "originLevel1": "default",
+                "originLevel1": "pokemon-zikora",
                 "originLevel2": "default",
                 "originLevel3": "localhost",
                 "searchQueryUid": search_query_uid,

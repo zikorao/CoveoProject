@@ -13,9 +13,9 @@ challenges encountered and how they were solved, and the trade-offs made.
 | --- | --- |
 | **Goal** | A professional, commerce-grade search UI over a Coveo index of Pokemon. |
 | **Core requirements** | Facet by **Type**, facet by **Generation**, show each Pokemon's **picture** in results. |
-| **Extended work** | SSR, analytics context, clean data ingestion, type-ahead (ML Query Suggestions + instant results), Pokemon detail page, security hardening, RGA plan. |
+| **Extended work** | SSR, analytics context, clean data ingestion, type-ahead (ML QS + instant results), Pokemon detail page, **ART** on `pokemon-zikora` pipeline, ML analytics simulation, Relevance Inspector validation, security hardening, RGA plan. |
 | **Repository** | https://github.com/zikorao/CoveoProject |
-| **Coveo org** | `mrzikora632mb41x` (default query pipeline) |
+| **Coveo org** | `mrzikora632mb41x` - live traffic uses **`Search pipeline - pokemon-zikora`** (search hub `pokemon-zikora`) |
 
 ---
 
@@ -31,7 +31,12 @@ flowchart TD
     subgraph Coveo
         IDX --> SAPI[Search API]
         IDX --> QS[ML Query Suggestions model]
+        IDX --> ART[ML ART model]
         UA[Usage Analytics] --> QS
+        UA --> ART
+        PIPE[Search pipeline - pokemon-zikora]
+        PIPE --> QS
+        PIPE --> ART
     end
 
     subgraph "Next.js App (App Router)"
@@ -103,8 +108,12 @@ We push clean, structured documents instead of crawling HTML.
   `generationFacet` (9 values, alphanumeric), `querySummary`, `pager`.
 
 **Machine Learning**
-- **Query Suggestions (QS)** model associated with the `default` pipeline,
-  trained on Usage Analytics search events.
+- **Query Suggestions (QS)** model associated with the query pipeline, trained
+  on Usage Analytics **search** events (`queryText`).
+- **Automatic Relevance Tuning (ART)** model associated with **`Search pipeline -
+  pokemon-zikora`**, trained on Usage Analytics **search + click** pairs.
+- API key enforces **search hub** `pokemon-zikora` (request `searchHub` params are
+  overridden by the token).
 
 ---
 
@@ -159,7 +168,113 @@ schedule) to incorporate the data.
 
 ---
 
-## 9. SSR & analytics
+## 9. ML experiments and verification activities
+
+This section documents the hands-on ML work beyond the base storefront: cold-start
+training, pipeline alignment, ART deployment, and how results were validated.
+
+### 9.1 Experiment A - Query Suggestions (QS) cold-start
+
+**Hypothesis:** A new catalog has no Usage Analytics traffic, so the QS model
+stays empty until events exist.
+
+**Activities:**
+1. Created a QS model in Coveo Admin and associated it with the query pipeline.
+2. Observed model status **Limited** - *"Model is empty and won't return responses"*.
+3. Verified `querySuggest` API returned `"completions": []` for `q=char` and empty `q`.
+4. Ran `scripts/simulate_searches.py` - **3,075** accepted search events (1,025
+   Pokemon names x 3 repeats, unique visitor per event).
+5. After daily rebuild, QS returned completions (e.g. empty query -> `bulbasaur`);
+   prefix suggestions remained sparse until more varied traffic accumulates.
+
+**Outcome:** QS **works** but needs analytics volume and rebuild cycles; instant
+results (Section 8) cover type-ahead in the meantime.
+
+### 9.2 Experiment B - Instant results type-ahead (wildcard)
+
+**Hypothesis:** Coveo matches whole keywords by default, so partial input (`pik`)
+returns zero hits unless wildcards are enabled.
+
+**Activities:**
+1. Direct Search API tests: `q=pik` -> 0 results; `q=pik*` with `wildcards: true`
+   -> Pikachu, Pikipek.
+2. Implemented debounced client-side search in `SearchBox.tsx` with prefix query
+   (`char` -> `char*`) and `AbortController` cancellation.
+3. Toggled `INSTANT_RESULTS_ENABLED` off during QS-only testing, then re-enabled
+   for production UX.
+
+**Outcome:** Comprehensive type-ahead **without** waiting for ML QS maturity.
+
+### 9.3 Experiment C - Automatic Relevance Tuning (ART) deployment
+
+**Hypothesis:** ART must be associated on the **same pipeline and search hub**
+as live traffic, with **click** analytics (not search-only).
+
+**Activities:**
+
+| Step | Action | Finding |
+| --- | --- | --- |
+| 1 | Associated ART on `default` with strict conditions (search hub, IPX context, Recommendation) | Relevance Inspector: empty **Query pipeline rules and models**; Boost 0 |
+| 2 | Discovered token **overrides** `searchHub` in all requests | Condition must match **API key search hub**, not arbitrary values |
+| 3 | Aligned hub to `pokemon-zikora` | Traffic routes to **`Search pipeline - pokemon-zikora`** |
+| 4 | Moved ART association to that pipeline; simplified conditions (catalog: hub only, no Recommendation clause) | RI shows **Automatic Relevance Tuning** executed |
+| 5 | Ran `scripts/simulate_clicks.py` (first with `originLevel1: default`) | **1,025** search+click sessions on push source results |
+| 6 | Re-aligned analytics to `originLevel1: pokemon-zikora` in both simulators; re-ran searches + clicks | **3,075** search + **1,025** click events accepted |
+| 7 | Rebuilt ART model in Admin | Model active; ART runs on queries |
+
+**Validated query (`electric`):**
+- **66 results** via Search pipeline - pokemon-zikora
+- Relevance Inspector: ART in query journey; top hits Kilowattrel, Pawmi, Bellibolt, etc.
+- **Boost: 0** on rows - ART **executed** but did not add extra QRE weight yet (common with simulated, uniform click data and tied lexical scores)
+
+**Outcome:** ART is **deployed and executing**; Relevance Inspector is the authoritative
+pass/fail. API `QRE: 0` in `rankingInfo` is not required for ART to be "on."
+
+### 9.4 Verification toolkit (`scripts/test_art.py`)
+
+Automated checklist (run after env vars are set):
+
+```bash
+export COVEO_ORG=your_org_id
+export COVEO_ACCESS_TOKEN=your_search_token
+python3 scripts/test_art.py
+```
+
+| Check | What it proves |
+| --- | --- |
+| Pipeline = pokemon-zikora | Hub/routing alignment |
+| Results for `pikachu` | Index + cq filter healthy |
+| QS completions | ML suggest path alive |
+| QRE > 0 | Strict signal for ranking boost (often still 0 when ART runs) |
+| ITD / `lq` | Intelligent Term Detection (needs ITD enabled + richer docs) |
+
+Each run prints a **searchUid** for Coveo **Relevance Inspector**.
+
+### 9.5 Analytics alignment (`originLevel1` = search hub)
+
+Coveo maps **`originLevel1` in Usage Analytics to `searchHub`**. Simulators were
+updated from `default` to **`pokemon-zikora`** so training data matches the API
+key and ART association:
+
+- `scripts/simulate_searches.py` - search events for QS
+- `scripts/simulate_clicks.py` - paired search + `documentOpen` click with
+  `contentIdKey` / `contentIdValue` = `permanentid` (required for ART)
+
+**Note:** Rebuilding with web-crawl + push analytics was **not** used for PokeMart;
+the app filters to the push source only, so crawl traffic would add noise.
+
+### 9.6 Relevance Inspector workflow (recommended)
+
+1. Run a search in the app (e.g. `electric`).
+2. Copy `searchUid` from the `/rest/search/v2` response (or from `test_art.py`).
+3. **Admin -> Relevance Inspector** -> paste UID -> **Inspect**.
+4. Confirm **Query pipeline selection** and **Automatic Relevance Tuning** under
+   **Query pipeline rules and models**.
+5. Review per-result **Boost** column (0 is OK when ART ran but did not promote).
+
+---
+
+## 10. SSR & analytics
 
 - **SSR hydration**: server renders initial results (`fetchStaticState`), client
   hydrates (`hydrateStaticState`) for interactivity - good first paint + SEO,
@@ -169,7 +284,7 @@ schedule) to incorporate the data.
 
 ---
 
-## 10. Security
+## 11. Security
 
 - Credentials moved from hard-coded values to `NEXT_PUBLIC_COVEO_*` **environment
   variables** (`.env.local`, gitignored; `.env.example` committed as a template).
@@ -179,7 +294,7 @@ schedule) to incorporate the data.
 
 ---
 
-## 11. Challenges and resolutions
+## 12. Challenges and resolutions
 
 | Challenge | Root cause | Resolution |
 | --- | --- | --- |
@@ -195,10 +310,14 @@ schedule) to incorporate the data.
 | Instant results returned 0 for partial input | Coveo matches whole keywords | Enabled `wildcards` + prefix query (`char*`) |
 | RGA not available in code | `defineGeneratedAnswer` absent in SSR 2.9.16 | Documented upgrade vs client-only paths |
 | Secret in public repo | Token hard-coded and committed | Env vars + rotation + history scrub |
+| ART empty in Relevance Inspector | Wrong pipeline (`default` only), strict conditions (Recommendation, IPX), searchHub mismatch | ART on **Search pipeline - pokemon-zikora**; hub-only condition; token hub `pokemon-zikora` |
+| ART QRE always 0 in API | ART runs but no boost on exact/tied queries; simulated clicks | RI confirms execution; Boost 0 acceptable; optional richer clicks |
+| QS model empty | No analytics | `simulate_searches.py` + rebuild |
+| Analytics hub mismatch | Simulators used `originLevel1: default` | Updated to `pokemon-zikora`; re-seeded + ART rebuild |
 
 ---
 
-## 12. Trade-offs
+## 13. Trade-offs
 
 | Decision | Alternative | Why we chose it |
 | --- | --- | --- |
@@ -212,7 +331,7 @@ schedule) to incorporate the data.
 
 ---
 
-## 13. Configuration reference
+## 14. Configuration reference
 
 **App env (`.env.local`)**
 ```
@@ -227,25 +346,30 @@ COVEO_SOURCE=...
 COVEO_PUSH_KEY=...
 ```
 
-**Analytics simulation env (`scripts/simulate_searches.py`)**
+**Analytics simulation env (`simulate_searches.py`, `simulate_clicks.py`, `test_art.py`)**
 ```
 COVEO_ORG=...
 COVEO_ACCESS_TOKEN=...
 ```
 
 **Coveo admin checklist**
-- Push source created and populated (~1025 docs).
+- Push source populated (~1025 docs); app uses `cq = @source=="push API solution"`.
 - Fields `type`, `generation`, `picture` mapped; `type`/`generation` facetable.
 - (Pending) `@type` set to "Include in results" for inline chips.
-- QS model created and associated with the `default` pipeline.
+- QS model on query pipeline; rebuild after `simulate_searches.py`.
+- ART model on **Search pipeline - pokemon-zikora**; condition **Search hub is pokemon-zikora**; rebuild after `simulate_clicks.py`.
+- API key **search hub** matches ART condition.
 
 ---
 
-## 14. Roadmap / pending
+## 15. Roadmap / pending
 
 - **`@type` displayable**: flip "Include in results" so type chips show in cards.
 - **QS maturation**: more/varied search traffic, then daily rebuild for richer
   prefix suggestions.
+- **ART stronger boosts**: optional targeted click simulation (e.g. query `electric`
+  -> electric-type Pokemon) or real user traffic; compare Boost in RI.
+- **ITD**: enable on ART association; enrich push documents with descriptions for `lq` queries.
 - **Relevance Generative Answering (RGA)**:
   1. Confirm license/entitlement on the org.
   2. Enable + scope RGA on the `default` pipeline to the push source.
@@ -255,7 +379,7 @@ COVEO_ACCESS_TOKEN=...
 
 ---
 
-## 15. How to run
+## 16. How to run
 
 ```bash
 npm install
@@ -269,8 +393,11 @@ export COVEO_ORG=... COVEO_SOURCE=... COVEO_PUSH_KEY=...
 python3 scripts/push_pokemon.py
 ```
 
-Seed analytics for the QS model:
+Seed analytics for ML models (hub-aligned):
 ```bash
 export COVEO_ORG=... COVEO_ACCESS_TOKEN=...
-python3 scripts/simulate_searches.py
+python3 scripts/simulate_searches.py   # QS training (~3075 search events)
+python3 scripts/simulate_clicks.py     # ART training (~1025 search+click sessions)
+python3 scripts/test_art.py            # verification checklist + searchUid for RI
 ```
+Rebuild QS and ART models in Coveo Admin after seeding.

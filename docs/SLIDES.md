@@ -30,27 +30,24 @@ Repo: github.com/zikorao/CoveoProject
 
 # Solution at a Glance
 
-- **Storefront UI**: search bar, type/generation facets, product-card grid, pagination, result count
-- **Clean data**: ~1025 Pokemon pushed from PokeAPI into a Coveo Push source
-- **Type-ahead**: ML Query Suggestions (preloaded) + live instant results
-- **Detail page**: per-Pokemon view fetched from the Coveo Search API
-- **SSR + analytics**: server fetch, client hydration, per-visitor context
+- **Storefront UI**: search bar, type/generation facets, product-card grid, pagination
+- **Clean data**: ~1025 Pokemon via Push API (`push API solution` source)
+- **Type-ahead**: ML Query Suggestions + instant results (wildcard prefix)
+- **Detail page**: `/pokemon/[name]` from Coveo Search API
+- **ML**: QS + **ART** on **`Search pipeline - pokemon-zikora`** (hub `pokemon-zikora`)
+- **Verification**: `test_art.py` + **Relevance Inspector**
 
 ---
 
 # Architecture
 
 ```
-PokeAPI --(push_pokemon.py)--> Coveo Push API --> Coveo Index
-                                                      |
-   Usage Analytics --> QS model                   Search API
-                                                      |
-Next.js App Router:
-  page.tsx (server, fetchStaticState)
-    -> SearchProvider (hydrateStaticState)
-      -> SearchInterface (SearchBox / Facets / ResultList / Pager)
-  pokemon/[name]/page.tsx (server, single-doc REST)
-  middleware.ts -> visitor cookie
+PokeAPI -> push_pokemon.py -> Push API -> Index
+Usage Analytics -> QS model + ART model
+Search pipeline - pokemon-zikora -> QS + ART
+Next.js: fetchStaticState -> hydrate -> SearchInterface
+SearchBox -> QS suggest + instant wildcard search
+scripts: simulate_searches | simulate_clicks | test_art
 ```
 
 ---
@@ -83,7 +80,8 @@ Next.js App Router:
   `cq = @source=="push API solution"`
 - Controllers: searchBox, resultList (`picture/type/generation`),
   typeFacet, generationFacet, querySummary, pager
-- QS model associated with the **default** pipeline
+- Live pipeline: **Search pipeline - pokemon-zikora** (search hub `pokemon-zikora`)
+- QS + ART models associated on that pipeline
 
 ---
 
@@ -110,15 +108,66 @@ Next.js App Router:
 
 ---
 
-# Training the QS Model
+# Experiment: QS Cold-Start
 
-`scripts/simulate_searches.py`
-- Logs ~3075 Usage Analytics **search events** (one per Pokemon name)
-- Gives the model candidate queries to learn from
-- Model **rebuilds daily** to incorporate the data
+1. QS model created -> status **Limited** (empty)
+2. `querySuggest` API -> `completions: []`
+3. **`simulate_searches.py`** -> **3,075** search events (`originLevel1: pokemon-zikora`)
+4. Daily **rebuild** -> e.g. preload suggests `bulbasaur`
 
-**Cold-start reality**: a new catalog has no traffic, so the model starts empty
-("Model is empty and won't return responses").
+**Lesson:** QS needs analytics + rebuild; instant results bridge the gap.
+
+---
+
+# Experiment: Instant Type-Ahead
+
+- Coveo matches **whole words** -> `pik` returns 0
+- Fix: `wildcards: true` + prefix query (`char*`)
+- Debounced Search API calls in `SearchBox.tsx`
+- Flag: `INSTANT_RESULTS_ENABLED` (on for production)
+
+---
+
+# Experiment: ART Deployment
+
+| Issue | Fix |
+| --- | --- |
+| ART not in Relevance Inspector | Wrong pipeline / strict conditions |
+| Token overrides searchHub | Match API key hub `pokemon-zikora` |
+| Recommendation condition | Removed for catalog search |
+| Search-only analytics | **`simulate_clicks.py`** (search + click) |
+
+**Rebuild ART** after aligned analytics.
+
+---
+
+# ART Verified (`electric`)
+
+- **66 results** - Kilowattrel, Pawmi, Bellibolt, ...
+- Relevance Inspector: **Automatic Relevance Tuning** in query journey
+- **Boost: 0** - ART **ran**, no extra promotion (simulated data / tied scores)
+- **Pass criterion:** ART **executes**, not QRE > 0 in API
+
+---
+
+# ML Toolkit (scripts)
+
+| Script | Purpose |
+| --- | --- |
+| `simulate_searches.py` | ~3075 UA search events (QS) |
+| `simulate_clicks.py` | ~1025 search+click sessions (ART) |
+| `test_art.py` | Checklist + **searchUid** for RI |
+
+`originLevel1` = **`pokemon-zikora`** (matches search hub)
+
+---
+
+# Verify: test_art + Relevance Inspector
+
+1. `python3 scripts/test_art.py` - checklist + **searchUid**
+2. Admin -> **Relevance Inspector** -> paste UID
+3. Confirm **Search pipeline - pokemon-zikora** + **ART** in query journey
+4. **Boost: 0** is OK when ART executed (RI is authoritative)
 
 ---
 
@@ -158,10 +207,11 @@ Next.js App Router:
 | Challenge | Fix |
 | --- | --- |
 | Polluted facet values (mixed sources) | Constant query to clean push source |
-| QS empty (cold-start) | Simulated analytics traffic + daily rebuild |
-| Instant results 0 on partial input | Enabled wildcards + prefix query |
+| QS empty (cold-start) | `simulate_searches.py` + rebuild |
+| ART empty in RI | ART on pokemon-zikora pipeline; hub condition |
+| Instant results 0 on partial input | Wildcards + prefix query |
+| Analytics hub mismatch | `originLevel1: pokemon-zikora` in simulators |
 | Secret in public repo | Env vars + rotation + history scrub |
-| RGA missing in SSR 2.9.16 | Documented upgrade / client-only paths |
 
 ---
 
@@ -177,19 +227,20 @@ Next.js App Router:
 
 # Roadmap
 
-- Flip `@type` to "Include in results" -> inline type chips everywhere
-- Grow search traffic -> richer ML prefix suggestions
-- **Relevance Generative Answering (RGA)**:
-  - Confirm license -> enable on pipeline -> enrich content -> add UI
-    (headless upgrade or client-only `buildGeneratedAnswer`)
+- `@type` "Include in results" -> inline type chips
+- Richer QS prefix suggestions (more traffic)
+- Stronger ART boosts (targeted clicks or real usage)
+- ITD + richer document text for `lq` queries
+- **RGA**: license, enable on pipeline, enrich content, UI (SSR upgrade)
 
 ---
 
 # Demo
 
-- **Catalog**: facets, product grid, pagination
-- **Type-ahead**: focus -> suggestions; type `char` -> instant results
-- **Detail page**: click a card -> Pokemon detail
+- **Catalog**: facets, grid, pagination (`Search pipeline - pokemon-zikora`)
+- **Type-ahead**: QS preload + instant (`char` -> Charizard, ...)
+- **Detail page**: product card -> `/pokemon/[name]`
+- **Verify ART**: search `electric` -> Relevance Inspector + searchUid
 
 `npm run dev` -> http://localhost:3000
 

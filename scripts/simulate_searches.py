@@ -82,7 +82,7 @@ def log_search(query):
     body = {
         "language": "en",
         "userAgent": "Mozilla/5.0 (simulated catalog traffic)",
-        "originLevel1": "default",
+        "originLevel1": "pokemon-zikora",
         "originLevel2": "default",
         "originLevel3": "localhost",
         "queryText": query,
