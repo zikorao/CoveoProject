@@ -17,6 +17,7 @@ and server-side rendering.
 - **Server-side rendering (SSR)** using Coveo's `fetchStaticState` / `hydrateStaticState` pattern.
 - **Analytics navigator context** wired through Next.js middleware for per-visitor tracking.
 - **Relevance Generative Answering (RGA)** panel powered by Coveo ML (after push re-index with descriptions).
+- **Contextual Passage Retrieval (CPR)** via Coveo **Passage Retrieval API**, shown as collapsible **Source passages** nested under the generated answer.
 
 ## Tech stack
 

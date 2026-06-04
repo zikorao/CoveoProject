@@ -3,7 +3,8 @@
 A commerce-style product search experience for Pokemon, built on **Next.js (App
 Router)** and **Coveo Headless React (SSR)**. This document describes the full
 solution: architecture, configuration, the data pipeline, features, the
-challenges encountered and how they were solved, and the trade-offs made.
+challenges encountered and how they were solved, the trade-offs made, and a
+**step-by-step evolution analysis** (Section 17) from storefront through CPR.
 
 ---
 
@@ -13,7 +14,7 @@ challenges encountered and how they were solved, and the trade-offs made.
 | --- | --- |
 | **Goal** | A professional, commerce-grade search UI over a Coveo index of Pokemon. |
 | **Core requirements** | Facet by **Type**, facet by **Generation**, show each Pokemon's **picture** in results. |
-| **Extended work** | SSR, analytics context, clean data ingestion, type-ahead (ML QS + instant results), Pokemon detail page, **ART** + **RGA** on `pokemon-zikora` pipeline, ML analytics simulation, verification scripts, **Generated Answer** UI, security hardening. |
+| **Extended work** | SSR, analytics context, clean data ingestion, type-ahead (ML QS + instant results), Pokemon detail page, **ART** + **RGA** + **CPR** on `pokemon-zikora` pipeline, ML analytics simulation, verification scripts, **Generated Answer** UI with nested **Passage Retrieval API** evidence, security hardening. |
 | **Repository** | https://github.com/zikorao/CoveoProject |
 | **Coveo org** | `mrzikora632mb41x` - live traffic uses **`Search pipeline - pokemon-zikora`** (search hub `pokemon-zikora`) |
 
@@ -33,17 +34,21 @@ flowchart TD
         IDX --> QS[ML Query Suggestions model]
         IDX --> ART[ML ART model]
         IDX --> RGA[ML RGA model]
+        IDX --> CPR[ML CPR model]
+        IDX --> PRAPI[Passage Retrieval API<br/>/v3/passages/retrieve]
+        CPR --> PRAPI
         UA[Usage Analytics] --> QS
         UA --> ART
         PIPE[Search pipeline - pokemon-zikora]
         PIPE --> QS
         PIPE --> ART
         PIPE --> RGA
+        PIPE --> CPR
     end
 
     subgraph "Next.js App (App Router)"
         SC[page.tsx - Server Component<br/>fetchStaticState] --> SP[SearchProvider<br/>hydrateStaticState]
-        SP --> UI[SearchInterface<br/>SearchBox / Facets / RGA / Results / Pager]
+        SP --> UI[SearchInterface<br/>SearchBox / Facets / RGA+CPR / Results / Pager]
         DP[pokemon/[name]/page.tsx<br/>Server Component]
     end
 
@@ -53,6 +58,8 @@ flowchart TD
     UI -->|query suggest| QS
     UI -->|generativeQuestionAnsweringId| RGA
     UI -->|SSE stream answer| RGA
+    UI -->|retrievePassages POST| PRAPI
+    PRAPI --> IDX
     DP -->|single-doc REST| SAPI
     MW[middleware.ts<br/>visitor cookie] --> SC
     UI -->|search events| UA
@@ -125,8 +132,13 @@ We push clean, structured documents instead of crawling HTML.
   and search hub `pokemon-zikora`. Search responses expose
   `extendedResults.generativeQuestionAnsweringId`; answers stream from
   `GET /rest/organizations/{org}/machinelearning/streaming/{streamId}`.
-- API key enforces **search hub** `pokemon-zikora` (request `searchHub` params are
-  overridden by the token).
+- **Contextual Passage Retrieval (CPR)** plus **Semantic Encoder** on the same
+  pipeline. Ranked passages are returned by the **Passage Retrieval API**
+  (`POST /rest/search/v3/passages/retrieve`), separate from the Search API and
+  RGA stream.
+- API key enforces **search hub** (e.g. `Pokemon-zikora` / `pokemon-zikora` per
+  token). Omit `searchHub` in PR API requests when the token already enforces the
+  hub; a mismatched hub in the body can return **400**.
 
 ---
 
@@ -142,7 +154,8 @@ We push clean, structured documents instead of crawling HTML.
 | `components/ResultList.tsx` | Product-card grid; links to internal detail pages. |
 | `components/QuerySummary.tsx` | "Showing X-Y of N" result count. |
 | `components/Pager.tsx` | Numbered pagination. |
-| `components/GeneratedAnswer.tsx` | RGA panel: `buildGeneratedAnswer` on hydrated engine; streams answer, citations, feedback. |
+| `components/GeneratedAnswer.tsx` | RGA panel (`buildGeneratedAnswer`) plus collapsible **Source passages (CPR)** fed by `retrievePassages()` after each executed search. |
+| `lib/passage-retrieval.ts` | Client helper: `POST .../rest/search/v3/passages/retrieve` with the same `SOURCE_FILTER` as catalog search. |
 | `app/pokemon/[name]/page.tsx` | Detail page; single-document fetch via Search API. |
 | `lib/navigator-context.ts` | Builds `NavigatorContext` from Next.js headers/cookies. |
 | `middleware.ts` | Sets the stable visitor-id cookie for analytics correlation. |
@@ -158,6 +171,10 @@ We push clean, structured documents instead of crawling HTML.
 - **Query summary** (result count + echoed query) and **pagination**.
 - **Generated answer** (RGA) panel above the result grid when Coveo returns an
   answer for the current query (Helpful / Not helpful / Regenerate).
+- **Source passages (CPR)** nested under the RGA panel (collapsible `<details>`,
+  default closed): ranked passage text, document title/link, and relevance score
+  from the Passage Retrieval APIÿfetched once per executed query, not on every
+  keystroke.
 - Responsive layout (sidebar collapses on tablet/mobile).
 
 ---
@@ -313,20 +330,60 @@ legacy pokemondb crawl.
 The storefront shows answers in the **Generated answer** panel when the model
 returns content.
 
+### 9.8 Experiment E - Contextual Passage Retrieval (CPR) via Passage Retrieval API
+
+**Hypothesis:** CPR on **`Search pipeline - pokemon-zikora`** returns semantically
+ranked passages from the same push catalog the app searches, exposing evidence
+the RGA stream does not surface as granular snippets.
+
+**Activities:**
+
+| Step | Action | Finding |
+| --- | --- | --- |
+| 1 | Associated **CPR** + **Semantic Encoder** on pokemon-zikora pipeline | PR API returns `items[]` with `text`, `relevanceScore`, `document` |
+| 2 | Implemented `lib/passage-retrieval.ts` + `scripts/retrieve_passages.py` | `POST /rest/search/v3/passages/retrieve` with `filter = @source=="push API solution"` |
+| 3 | CLI tests (`pikachu`, type questions) | Top passage often correct mon; related mons can appear in top 5 (shared electric/water context) |
+| 4 | Prototype standalone CPR panel in UI | Worked but duplicated layout vs RGA panel |
+| 5 | **Merged UX (option 1):** collapsible **Source passages (CPR)** inside `GeneratedAnswer.tsx` | Single generative area: RGA answer + RGA citations + CPR passages |
+| 6 | Fetch timing | Passages load on `queryExecuted` after search completes (`!isLoading`), debounced per query string |
+
+**Validated queries:**
+- `What type is Pikachu?` - passages cite Pikachu (and sometimes related species in lower ranks)
+- Same `cq` / hub alignment as catalog search and RGA
+
+**Outcome:** Passage Retrieval API is **integrated in production UI** (not a separate
+page). CLI remains for Admin/API verification without running the app.
+
 ---
 
-## 10. RGA in the application
+## 10. Generative stack in the application (RGA + CPR)
 
 `@coveo/headless-react` SSR 2.9.16 does not expose `defineGeneratedAnswer`, so RGA
 uses the hydrated search engine from headless-react and **`buildGeneratedAnswer`**
 from **`@coveo/headless`** (same version as the SSR bundle: 3.50.1).
 
-**Flow:**
+**RGA flow:**
 1. User searches; Search API returns results + `generativeQuestionAnsweringId`.
 2. `GeneratedAnswer` controller subscribes to engine state and opens the ML **SSE**
    stream for that id.
-3. `components/GeneratedAnswer.tsx` renders loading steps, streamed text, citations,
-   and feedback actions.
+3. `components/GeneratedAnswer.tsx` renders loading steps, streamed text, **RGA
+   sources** (citations), feedback actions, and the CPR block below.
+
+**CPR flow (Passage Retrieval API):**
+1. On engine subscribe, when `search.queryExecuted` is set and `search.isLoading`
+   is false, the panel calls `retrievePassages({ query, maxPassages: 5 })`.
+2. `lib/passage-retrieval.ts` POSTs to `/rest/search/v3/passages/retrieve` with
+   the same `SOURCE_FILTER` as `lib/engine.ts` (`preprocessRequest` cq).
+3. UI shows a `<details>` section **Source passages (CPR)** (collapsed by default)
+   with title links, scores, and passage text.
+
+**Three complementary surfaces:**
+
+| Surface | API / mechanism | What the user sees |
+| --- | --- | --- |
+| **Catalog search** | Search API v2 (Headless) | Facets, product grid, pager |
+| **Generated answer** | RGA SSE stream | Natural-language answer + citation list |
+| **Source passages** | Passage Retrieval API v3 | Ranked evidence snippets (CPR) |
 
 **Engine export:** `useEngine` is re-exported from `lib/engine.ts` alongside the
 SSR controller hooks.
@@ -338,10 +395,12 @@ export COVEO_ORG=your_org_id
 export COVEO_ACCESS_TOKEN=your_search_token
 python3 scripts/test_rga.py
 python3 scripts/test_rga.py --query "what type is bulbasaur"
+python3 scripts/retrieve_passages.py --query "pikachu"
+python3 scripts/retrieve_passages.py --query "What type is Pikachu?" --max-passages 5
 ```
 
-Optional `--include-crawl` runs a second scenario without `cq` (includes pokemondb
-crawl) for comparison.
+Optional `--include-crawl` on `test_rga.py` runs a second scenario without `cq`
+(includes pokemondb crawl) for comparison.
 
 ---
 
@@ -386,6 +445,9 @@ crawl) for comparison.
 | ART QRE always 0 in API | ART runs but no boost on exact/tied queries; simulated clicks | RI confirms execution; Boost 0 acceptable; optional richer clicks |
 | QS model empty | No analytics | `simulate_searches.py` + rebuild |
 | Analytics hub mismatch | Simulators used `originLevel1: default` | Updated to `pokemon-zikora`; re-seeded + ART rebuild |
+| PR API 400 on `searchHub` | Body hub did not match token-enforced hub | Omit `searchHub` in client/script unless exact match (`Pokemon-zikora`) |
+| CPR UI clutter | Standalone panel duplicated generative UX | Nested collapsible passages under RGA panel |
+| Dev server 404 | Stale `next dev` / corrupted `.next` | Kill ports 3000-3002, `rm -rf .next`, restart on :3000 |
 
 ---
 
@@ -401,6 +463,9 @@ crawl) for comparison.
 | **Direct REST call on detail page** | A second Headless engine instance | Simpler; one focused single-document request |
 | **`NEXT_PUBLIC_` token** | Server-only secret + proxy | Required because the client engine hydrates in the browser; token is search-scoped |
 | **Client `buildGeneratedAnswer`** | Upgrade headless-react for SSR RGA controller | Ships RGA now without a major SSR package bump; uses shared hydrated engine |
+| **CPR nested under RGA** | Separate CPR route or always-visible panel | Keeps storefront layout; generative evidence in one place |
+| **Direct `fetch` for PR API** | Headless controller for passages | Coveo documents PR API as REST; no Headless passage controller in this stack |
+| **Passages after search completes** | Fetch on every keystroke | Avoids redundant PR calls; aligns passages with executed query |
 
 ---
 
@@ -419,7 +484,7 @@ COVEO_SOURCE=...
 COVEO_PUSH_KEY=...
 ```
 
-**Analytics / verification env (`simulate_searches.py`, `simulate_clicks.py`, `test_art.py`, `test_rga.py`)**
+**Analytics / verification env (`simulate_searches.py`, `simulate_clicks.py`, `test_art.py`, `test_rga.py`, `retrieve_passages.py`)**
 ```
 COVEO_ORG=...
 COVEO_ACCESS_TOKEN=...
@@ -432,7 +497,8 @@ COVEO_ACCESS_TOKEN=...
 - QS model on query pipeline; rebuild after `simulate_searches.py`.
 - ART model on **Search pipeline - pokemon-zikora**; condition **Search hub is pokemon-zikora**; rebuild after `simulate_clicks.py`.
 - **RGA** model on **Search pipeline - pokemon-zikora**; content includes **push API solution** source.
-- API key **search hub** matches ART/RGA pipeline routing.
+- **CPR** + **Semantic Encoder** on **Search pipeline - pokemon-zikora**; verify with `retrieve_passages.py`.
+- API key **search hub** matches ART/RGA/CPR pipeline routing.
 
 **Push source id (example org):** `mrzikora632mb41x-uk6mcizls4f5hgnihkfqjdsej4` (name: push API solution).
 
@@ -447,10 +513,117 @@ COVEO_ACCESS_TOKEN=...
   -> electric-type Pokemon) or real user traffic; compare Boost in RI.
 - **ITD**: enable on ART association; optional `lq` queries in the UI.
 - **RGA via SSR controller**: upgrade `@coveo/headless-react` when `defineGeneratedAnswer` is available for a single-package SSR pattern.
+- **CPR quality**: tune CPR/SE or passage fields if related-species noise in top ranks is undesirable.
 
 ---
 
-## 17. How to run
+## 17. Solution evolution - analysis of steps taken
+
+This section records the **end-to-end path** from the original brief to the current
+solution (catalog + ML + unified generative UI), so reviewers can see *why* each
+layer exists and *what was tried* along the way.
+
+### Phase 1 - Commerce storefront foundation
+
+**Goal:** Meet the core brief (type/generation facets, pictures, professional UI).
+
+**Steps:**
+1. Chose **Next.js App Router** + **Coveo Headless React SSR** (`fetchStaticState` /
+   `hydrateStaticState`) for first paint and Coveo-recommended patterns.
+2. Built **Push API ingestion** (`push_pokemon.py`) from PokeAPI instead of crawling
+   pokemondb - structured `type`, `generation`, `picture`, stable facets.
+3. Added **`cq = @source=="push API solution"`** in `lib/engine.ts` to exclude the
+   legacy crawl source (duplicate results, HTML in facet values).
+4. Composed **SearchInterface**: facets, product-card grid, pager, query summary.
+
+**Result:** A working commerce-style catalog on a clean index (~1025 docs).
+
+### Phase 2 - Discoverability (type-ahead and detail)
+
+**Goal:** Feel like a real store: search-as-you-type and product detail pages.
+
+**Steps:**
+1. Wired **Query Suggestions** via Headless `searchBox` (preloaded on focus).
+2. Hit **QS cold-start** (empty model) - ran `simulate_searches.py` (~3075 events).
+3. Added **instant results** with **wildcard prefix** (`pik` -> `pik*`) because Coveo
+   matches whole tokens by default.
+4. Added **`/pokemon/[name]`** detail page via direct Search API (single document).
+
+**Result:** Type-ahead works immediately (instant results) while QS matures with traffic.
+
+### Phase 3 - Relevance tuning (ART)
+
+**Goal:** Deploy ART on the same pipeline as live traffic and prove execution in RI.
+
+**Steps:**
+1. Initial ART on `default` with strict conditions - **empty in Relevance Inspector**.
+2. Discovered API key **overrides `searchHub`** - aligned hub to **`pokemon-zikora`**.
+3. Moved ART to **Search pipeline - pokemon-zikora**; simplified conditions.
+4. Seeded **search + click** analytics (`simulate_clicks.py`); fixed `originLevel1`
+   in both simulators to match hub.
+5. Documented verification in `test_art.py` + Relevance Inspector workflow.
+
+**Result:** ART **executes** on catalog queries (Boost 0 acceptable with simulated clicks).
+
+### Phase 4 - Generative answers (RGA)
+
+**Goal:** Show Coveo **Relevance Generative Answering** on the *same* push catalog.
+
+**Steps:**
+1. Associated **RGA** on pokemon-zikora pipeline; confirmed `generativeQuestionAnsweringId`.
+2. **`answerGenerated: false`** on push-only - compared to crawl HTML (~600+ words).
+3. Enriched documents: genus, flavor lines, **HTML `data`/`body`**, re-push + **`IDLE`**.
+4. Verified with `test_rga.py` - **`answerGenerated: true`** for `pikachu`, type questions.
+5. Implemented **`GeneratedAnswer.tsx`** with `buildGeneratedAnswer` (headless 3.50.1)
+   because headless-react SSR 2.9.16 has no `defineGeneratedAnswer`.
+
+**Result:** RGA answers and citations from **push API solution** only.
+
+### Phase 5 - Passage evidence (CPR / Passage Retrieval API)
+
+**Goal:** Expose **Contextual Passage Retrieval** per Coveo docs, without breaking the
+storefront layout agreed with stakeholders.
+
+**Steps:**
+1. Implemented **`lib/passage-retrieval.ts`** and **`scripts/retrieve_passages.py`**
+   against `POST /rest/search/v3/passages/retrieve`.
+2. CLI validation with same `SOURCE_FILTER` and pipeline models (CPR + Semantic Encoder).
+3. Prototyped a **standalone CPR panel** - functional but visually redundant next to RGA.
+4. **UX decision:** merge into RGA panel as collapsible **Source passages (CPR)** (default
+   closed); fetch after `queryExecuted`, not per keystroke.
+5. Committed as zikorao (`5c10175`) after local approval on `http://localhost:3000`.
+
+**Result:** One generative region: **answer (RGA)** + **citations (RGA)** + **ranked
+passages (CPR/API)** + catalog grid below.
+
+### Cross-cutting work (all phases)
+
+| Theme | Actions |
+| --- | --- |
+| **Security** | Env vars, token rotation, `git filter-repo` history scrub |
+| **SSR analytics** | `middleware.ts` visitor cookie + `NavigatorContext` |
+| **Documentation** | `SOLUTION.md`, `SLIDES.md`, README, verification scripts |
+| **Operational pitfalls** | Hub casing for PR API; dev server port hygiene |
+
+### Current solution summary (as built)
+
+```text
+PokeAPI -> push_pokemon.py -> Push source (HTML + descriptions)
+                |
+                v
+Search pipeline - pokemon-zikora
+  + QS (suggestions)  + ART (ranking)  + RGA (SSE answer)  + CPR (passages API)
+                |
+                v
+Next.js PokeMart
+  - Catalog: Headless Search API (cq = push source)
+  - Generative panel: RGA stream + nested CPR via Passage Retrieval API
+  - Scripts: simulate_searches | simulate_clicks | test_art | test_rga | retrieve_passages
+```
+
+---
+
+## 18. How to run
 
 ```bash
 npm install
@@ -471,7 +644,12 @@ python3 scripts/simulate_searches.py   # QS training (~3075 search events)
 python3 scripts/simulate_clicks.py     # ART training (~1025 search+click sessions)
 python3 scripts/test_art.py            # ART checklist + searchUid for RI
 python3 scripts/test_rga.py            # RGA stream + answerGenerated on push index
+python3 scripts/retrieve_passages.py   # Passage Retrieval API (CPR)
 ```
 
 After `push_pokemon.py`, wait for the push source rebuild (or run `statusType=IDLE`).
-Rebuild QS and ART models in Coveo Admin after analytics seeding.
+Rebuild QS, ART, and CPR-related models in Coveo Admin after analytics seeding or
+content changes.
+
+In the app: search (e.g. `pikachu`), open **Generated answer**, expand **Source
+passages (CPR)** to compare RGA narrative vs CPR evidence snippets.
