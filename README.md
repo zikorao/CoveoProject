@@ -57,6 +57,8 @@ scripts/simulate_searches.py Seeds UA search events for the QS model
 scripts/simulate_clicks.py   Seeds UA search+click pairs for the ART model
 scripts/test_art.py          Checklist to verify ART / ML readiness
 scripts/test_rga.py          Checklist to verify RGA stream + answer generation
+scripts/retrieve_passages.py Call Coveo PR API (CPR + Semantic Encoder on pipeline)
+lib/passage-retrieval.ts   Client helper for /rest/search/v3/passages/retrieve
 ```
 
 ## Data ingestion
@@ -82,9 +84,12 @@ python3 scripts/simulate_searches.py   # Query Suggestions
 python3 scripts/simulate_clicks.py     # Automatic Relevance Tuning
 python3 scripts/test_art.py            # Verify ART readiness
 python3 scripts/test_rga.py            # Verify RGA stream + answers
+python3 scripts/retrieve_passages.py   # Passage Retrieval API (CPR)
 ```
 
 Re-push after changing `push_pokemon.py`, wait for the source rebuild, then run `test_rga.py`.
+
+**Passage Retrieval:** Associate a **CPR** model and **Semantic Encoder** on **Search pipeline - pokemon-zikora**. Do not pass `searchHub` in the script unless it matches the token hub (`Pokemon-zikora`).
 
 ## Configuration
 
