@@ -51,7 +51,10 @@ components/          UI components (SearchBox, Facet, ResultList, Pager, ...)
 lib/engine.ts        Coveo search engine + controller definitions
 lib/navigator-context.ts  NavigatorContext for SSR analytics
 middleware.ts        Sets a stable visitor id cookie
-scripts/push_pokemon.py   Ingests Pokemon data from PokeAPI into a Coveo Push source
+scripts/push_pokemon.py      Ingests Pokemon data from PokeAPI into a Coveo Push source
+scripts/simulate_searches.py Seeds UA search events for the QS model
+scripts/simulate_clicks.py   Seeds UA search+click pairs for the ART model
+scripts/test_art.py          Checklist to verify ART / ML readiness
 ```
 
 ## Data ingestion
@@ -66,6 +69,16 @@ export COVEO_ORG=your_org_id
 export COVEO_SOURCE=your_source_id
 export COVEO_PUSH_KEY=your_push_api_key
 python3 scripts/push_pokemon.py
+```
+
+Train ML models (read credentials from env):
+
+```bash
+export COVEO_ORG=your_org_id
+export COVEO_ACCESS_TOKEN=your_search_token
+python3 scripts/simulate_searches.py   # Query Suggestions
+python3 scripts/simulate_clicks.py     # Automatic Relevance Tuning
+python3 scripts/test_art.py            # Verify ART readiness
 ```
 
 ## Configuration
