@@ -78,17 +78,22 @@ def species_description(name):
             genus = entry.get("genus", "")
             break
 
-    flavor = ""
+    flavors = []
+    seen = set()
     for entry in data.get("flavor_text_entries", []):
-        if entry.get("language", {}).get("name") == "en":
-            flavor = clean_text(entry.get("flavor_text", ""))
+        if entry.get("language", {}).get("name") != "en":
+            continue
+        text = clean_text(entry.get("flavor_text", ""))
+        if text and text not in seen:
+            seen.add(text)
+            flavors.append(text)
+        if len(flavors) >= 4:
             break
 
     parts = []
     if genus:
         parts.append(f"The {genus}.")
-    if flavor:
-        parts.append(flavor)
+    parts.extend(flavors)
 
     description = " ".join(parts)
     SPECIES_CACHE[name] = description
@@ -127,13 +132,23 @@ def build_documents():
         if description:
             summary = f"{summary} {description}"
 
+        body = f"{summary} {description}".strip()
+        html = (
+            f"<html><head><title>{title}</title></head><body>"
+            f"<h1>{title}</h1>"
+            f"<p><strong>Type:</strong> {type_label}. "
+            f"<strong>Generation:</strong> {info['generation']}.</p>"
+            f"<p>{description}</p>"
+            f"</body></html>"
+        )
         docs.append({
             "documentId": f"https://pokemondb.net/pokedex/{name}",
             "title": title,
             "clickableUri": f"https://pokemondb.net/pokedex/{name}",
             "fileExtension": ".html",
-            "data": summary,
-            "description": summary,
+            "data": html,
+            "body": html,
+            "description": body,
             "type": types,
             "generation": info["generation"],
             "picture": ARTWORK.format(id=info["id"]),

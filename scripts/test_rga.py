@@ -159,8 +159,8 @@ def run_scenario(name, query, cq):
     if gen is False:
         print(
             "\n  RGA ran but did not generate an answer for this context.\n"
-            "  With push-only cq, documents lack rich text for grounding.\n"
-            "  Enrich push fields (description) or scope RGA to sources with body text."
+            "  Typical fixes: re-run push_pokemon.py (HTML + descriptions),\n"
+            "  signal IDLE rebuild, confirm RGA includes push API solution in Admin."
         )
 
     if parsed["error_message"]:
