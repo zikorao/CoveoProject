@@ -6,6 +6,7 @@ import {ResultList} from './ResultList';
 import {Facet} from './Facet';
 import {QuerySummary} from './QuerySummary';
 import {Pager} from './Pager';
+import {GeneratedAnswerPanel} from './GeneratedAnswer';
 
 export function SearchInterface() {
   return (
@@ -36,6 +37,7 @@ export function SearchInterface() {
             <h1>Pokemon Catalog</h1>
             <QuerySummary />
           </div>
+          <GeneratedAnswerPanel />
           <ResultList />
           <Pager />
         </main>

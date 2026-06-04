@@ -6,6 +6,7 @@ Builds one clean document per Pokemon species with:
   - type        : multi-value (e.g. ["Grass","Poison"])
   - generation  : integer 1-9
   - picture     : official artwork URL
+  - description : English genus + Pokedex flavor text (for RGA grounding)
 
 Credentials are read from the environment so the API key is never stored on disk:
   COVEO_ORG, COVEO_SOURCE, COVEO_PUSH_KEY
@@ -36,8 +37,8 @@ TYPE_NAMES = [
     "ice", "dragon", "dark", "fairy",
 ]
 
-
 UA = "CoveoZikora-Ingest/1.0 (+https://pokemondb.net)"
+SPECIES_CACHE = {}
 
 
 def http(method, url, body=None, headers=None, raw=False):
@@ -57,17 +58,53 @@ def id_from_url(url):
     return int(url.rstrip("/").split("/")[-1])
 
 
+def clean_text(text):
+    return " ".join(text.replace("\f", " ").replace("\n", " ").split())
+
+
+def species_description(name):
+    if name in SPECIES_CACHE:
+        return SPECIES_CACHE[name]
+
+    try:
+        data = get_json(f"{POKEAPI}/pokemon-species/{name}")
+    except urllib.error.URLError:
+        SPECIES_CACHE[name] = ""
+        return ""
+
+    genus = ""
+    for entry in data.get("genus", []):
+        if entry.get("language", {}).get("name") == "en":
+            genus = entry.get("genus", "")
+            break
+
+    flavor = ""
+    for entry in data.get("flavor_text_entries", []):
+        if entry.get("language", {}).get("name") == "en":
+            flavor = clean_text(entry.get("flavor_text", ""))
+            break
+
+    parts = []
+    if genus:
+        parts.append(f"The {genus}.")
+    if flavor:
+        parts.append(flavor)
+
+    description = " ".join(parts)
+    SPECIES_CACHE[name] = description
+    time.sleep(0.08)
+    return description
+
+
 def build_documents():
-    # 1) generation -> species (canonical ~1025 Pokemon) + per-species generation
-    species = {}  # name -> {"id": int, "generation": int}
+    species = {}
     for word, gen in GEN_WORDS.items():
         data = get_json(f"{POKEAPI}/generation/{gen}")
         for sp in data["pokemon_species"]:
             species[sp["name"]] = {"id": id_from_url(sp["url"]), "generation": gen}
         print(f"  generation {gen}: {len(data['pokemon_species'])} species")
 
-    # 2) type -> pokemon (capture slot for ordering)
-    type_map = {}  # pokemon name -> list of (slot, Type)
+    type_map = {}
     for tname in TYPE_NAMES:
         data = get_json(f"{POKEAPI}/type/{tname}")
         label = tname.capitalize()
@@ -77,28 +114,39 @@ def build_documents():
             )
     print(f"  type map built for {len(type_map)} pokemon")
 
-    # 3) assemble documents
+    print("  fetching species descriptions for RGA...")
     docs = []
-    for name, info in species.items():
+    for idx, (name, info) in enumerate(species.items(), start=1):
         types = [t for _, t in sorted(type_map.get(name, []))]
         title = name.replace("-", " ").title()
+        type_label = "/".join(types) if types else "Unknown"
+        description = species_description(name)
+        summary = (
+            f"{title} is a {type_label} type Pokemon from Generation {info['generation']}."
+        )
+        if description:
+            summary = f"{summary} {description}"
+
         docs.append({
             "documentId": f"https://pokemondb.net/pokedex/{name}",
             "title": title,
             "clickableUri": f"https://pokemondb.net/pokedex/{name}",
             "fileExtension": ".html",
-            "data": f"{title} {' '.join(types)} Generation {info['generation']}",
+            "data": summary,
+            "description": summary,
             "type": types,
             "generation": info["generation"],
             "picture": ARTWORK.format(id=info["id"]),
         })
+        if idx % 100 == 0:
+            print(f"    {idx}/{len(species)} descriptions fetched")
+
     return docs
 
 
 def push(docs):
     auth = {"Authorization": f"Bearer {KEY}"}
 
-    # a) request a file container
     s, b = http("POST", f"{PUSH_BASE}/files",
                 headers={**auth, "Content-Type": "application/json"})
     container = json.loads(b)
@@ -107,12 +155,10 @@ def push(docs):
     req_headers = container.get("requiredHeaders", {})
     print(f"  file container: {file_id}")
 
-    # b) upload the batch payload to the container
     payload = json.dumps({"addOrUpdate": docs, "delete": []}).encode()
     s, b = http("PUT", upload_uri, body=payload, headers=req_headers, raw=True)
     print(f"  uploaded payload ({len(payload)} bytes) -> HTTP {s}")
 
-    # c) tell the source to ingest the file
     s, b = http("PUT",
                 f"{PUSH_BASE}/sources/{SOURCE}/documents/batch?fileId={file_id}",
                 headers={**auth, "Content-Type": "application/json"})

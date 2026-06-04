@@ -16,6 +16,7 @@ and server-side rendering.
 - **Pagination** and a live **result summary** ("Showing 1-10 of N Pokemon").
 - **Server-side rendering (SSR)** using Coveo's `fetchStaticState` / `hydrateStaticState` pattern.
 - **Analytics navigator context** wired through Next.js middleware for per-visitor tracking.
+- **Relevance Generative Answering (RGA)** panel powered by Coveo ML (after push re-index with descriptions).
 
 ## Tech stack
 
@@ -55,12 +56,13 @@ scripts/push_pokemon.py      Ingests Pokemon data from PokeAPI into a Coveo Push
 scripts/simulate_searches.py Seeds UA search events for the QS model
 scripts/simulate_clicks.py   Seeds UA search+click pairs for the ART model
 scripts/test_art.py          Checklist to verify ART / ML readiness
+scripts/test_rga.py          Checklist to verify RGA stream + answer generation
 ```
 
 ## Data ingestion
 
 `scripts/push_pokemon.py` builds one clean document per Pokemon (title, types,
-generation, official artwork) from [PokeAPI](https://pokeapi.co/) and pushes them
+generation, official artwork, **description** for RGA) from [PokeAPI](https://pokeapi.co/) and pushes them
 to a Coveo Push source. Credentials are read from environment variables so no key
 is stored in the repo:
 
@@ -79,7 +81,10 @@ export COVEO_ACCESS_TOKEN=your_search_token
 python3 scripts/simulate_searches.py   # Query Suggestions
 python3 scripts/simulate_clicks.py     # Automatic Relevance Tuning
 python3 scripts/test_art.py            # Verify ART readiness
+python3 scripts/test_rga.py            # Verify RGA stream + answers
 ```
+
+Re-push after changing `push_pokemon.py`, wait for the source rebuild, then run `test_rga.py`.
 
 ## Configuration
 

@@ -82,4 +82,5 @@ export const {
   setNavigatorContextProvider,
   StaticStateProvider,
   HydratedStateProvider,
+  useEngine,
 } = engineDefinition;
