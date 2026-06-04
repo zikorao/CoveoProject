@@ -34,20 +34,21 @@ Repo: github.com/zikorao/CoveoProject
 - **Clean data**: ~1025 Pokemon via Push API (`push API solution` source)
 - **Type-ahead**: ML Query Suggestions + instant results (wildcard prefix)
 - **Detail page**: `/pokemon/[name]` from Coveo Search API
-- **ML**: QS + **ART** on **`Search pipeline - pokemon-zikora`** (hub `pokemon-zikora`)
-- **Verification**: `test_art.py` + **Relevance Inspector**
+- **ML**: QS + **ART** + **RGA** on **`Search pipeline - pokemon-zikora`**
+- **Generated answer** panel (`buildGeneratedAnswer` + SSE stream)
+- **Verification**: `test_art.py`, `test_rga.py`, **Relevance Inspector**
 
 ---
 
 # Architecture
 
 ```
-PokeAPI -> push_pokemon.py -> Push API -> Index
-Usage Analytics -> QS model + ART model
-Search pipeline - pokemon-zikora -> QS + ART
-Next.js: fetchStaticState -> hydrate -> SearchInterface
-SearchBox -> QS suggest + instant wildcard search
-scripts: simulate_searches | simulate_clicks | test_art
+PokeAPI -> push_pokemon.py (HTML + descriptions) -> Push API -> Index
+Usage Analytics -> QS + ART models
+Search pipeline - pokemon-zikora -> QS + ART + RGA
+Next.js: fetchStaticState -> hydrate -> SearchInterface + GeneratedAnswer
+SearchBox -> QS + instant wildcard | RGA SSE stream
+scripts: simulate_searches | simulate_clicks | test_art | test_rga
 ```
 
 ---
@@ -56,6 +57,7 @@ scripts: simulate_searches | simulate_clicks | test_art
 
 - **Next.js 14** App Router, **React 18**, **TypeScript**
 - **@coveo/headless-react 2.9.16** (`/ssr` entrypoint)
+- **@coveo/headless 3.50.1** (`buildGeneratedAnswer` for RGA UI)
 - **Python 3** (stdlib only) for ingestion + analytics simulation
 - **PokeAPI** as the upstream data source
 
@@ -64,11 +66,12 @@ scripts: simulate_searches | simulate_clicks | test_art
 # Data Pipeline (Push, not Crawl)
 
 `scripts/push_pokemon.py`
-- One clean document per Pokemon: `title`, `type` (multi), `generation`, `picture`
-- Push API **file-container** flow -> batch ingestion (~1025 docs)
-- Credentials from env vars (no keys on disk); idempotent
+- Fields: `title`, `type`, `generation`, `picture`, **`description`**
+- **`data` / `body`**: HTML with genus + Pokedex flavor text (RGA grounding)
+- Push API batch (~1025 docs) -> signal **`IDLE`** rebuild
+- Credentials from env vars; ~2-3 min for species enrichment
 
-**Why push over crawl?** Structured, reliable fields - no HTML noise in facets.
+**Why push over crawl?** Clean facets; rich generative text without crawl noise.
 
 ---
 
@@ -81,7 +84,7 @@ scripts: simulate_searches | simulate_clicks | test_art
 - Controllers: searchBox, resultList (`picture/type/generation`),
   typeFacet, generationFacet, querySummary, pager
 - Live pipeline: **Search pipeline - pokemon-zikora** (search hub `pokemon-zikora`)
-- QS + ART models associated on that pipeline
+- QS + ART + **RGA** on that pipeline (hub `pokemon-zikora`)
 
 ---
 
@@ -89,7 +92,8 @@ scripts: simulate_searches | simulate_clicks | test_art
 
 - Faceted filtering with **official Pokemon type colors** + counts
 - Product-card grid: artwork, name, **generation badge**, **type chips**
-- Query summary ("Showing 1-10 of N") and pagination
+- Query summary and pagination
+- **Generated answer** (RGA) above the grid when the model responds
 - Fully responsive storefront layout
 
 ---
@@ -157,8 +161,31 @@ scripts: simulate_searches | simulate_clicks | test_art
 | `simulate_searches.py` | ~3075 UA search events (QS) |
 | `simulate_clicks.py` | ~1025 search+click sessions (ART) |
 | `test_art.py` | Checklist + **searchUid** for RI |
+| `test_rga.py` | RGA stream + **answerGenerated** on push index |
 
 `originLevel1` = **`pokemon-zikora`** (matches search hub)
+
+---
+
+# Experiment: RGA on Push Catalog
+
+| Step | Result |
+| --- | --- |
+| RGA on **pokemon-zikora** pipeline | `generativeQuestionAnsweringId` on every search |
+| Push-only, short `data` | `answerGenerated: false` |
+| Enriched HTML + flavor text + rebuild | `answerGenerated: true` |
+| UI | `GeneratedAnswer.tsx` + `buildGeneratedAnswer` |
+
+**Verified:** `pikachu`, `what type is bulbasaur` - citations from **push API solution**
+
+---
+
+# Generated Answer UI
+
+- `useEngine()` from hydrated SSR engine
+- `buildGeneratedAnswer` (`@coveo/headless`) enables + streams SSE
+- Panel: loading steps, answer text, citations, Helpful / Regenerate
+- Same `cq` as catalog - answers use push documents only
 
 ---
 
@@ -212,6 +239,8 @@ scripts: simulate_searches | simulate_clicks | test_art
 | Instant results 0 on partial input | Wildcards + prefix query |
 | Analytics hub mismatch | `originLevel1: pokemon-zikora` in simulators |
 | Secret in public repo | Env vars + rotation + history scrub |
+| RGA empty on push | Sparse plain text vs crawl HTML | HTML body + descriptions + rebuild |
+| No SSR RGA controller | headless-react 2.9.16 gap | Client `buildGeneratedAnswer` on hydrate |
 
 ---
 
@@ -222,6 +251,7 @@ scripts: simulate_searches | simulate_clicks | test_art
 - **SSR + hydration** over pure CSR -> first paint + SEO
 - **Instant results + ML QS** over QS-only -> beat the cold-start
 - **Direct REST** on detail page over a second engine -> simpler
+- **Client RGA controller** over SSR `defineGeneratedAnswer` -> ships RGA without package bump
 
 ---
 
@@ -230,8 +260,8 @@ scripts: simulate_searches | simulate_clicks | test_art
 - `@type` "Include in results" -> inline type chips
 - Richer QS prefix suggestions (more traffic)
 - Stronger ART boosts (targeted clicks or real usage)
-- ITD + richer document text for `lq` queries
-- **RGA**: license, enable on pipeline, enrich content, UI (SSR upgrade)
+- ITD + optional `lq` in the UI
+- **SSR-native RGA** when headless-react adds `defineGeneratedAnswer`
 
 ---
 
@@ -239,8 +269,9 @@ scripts: simulate_searches | simulate_clicks | test_art
 
 - **Catalog**: facets, grid, pagination (`Search pipeline - pokemon-zikora`)
 - **Type-ahead**: QS preload + instant (`char` -> Charizard, ...)
+- **RGA**: search `pikachu` or `what type is bulbasaur` -> **Generated answer** panel
 - **Detail page**: product card -> `/pokemon/[name]`
-- **Verify ART**: search `electric` -> Relevance Inspector + searchUid
+- **Verify ML**: `test_art.py`, `test_rga.py`, Relevance Inspector + searchUid
 
 `npm run dev` -> http://localhost:3000
 

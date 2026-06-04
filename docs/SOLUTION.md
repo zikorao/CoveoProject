@@ -13,7 +13,7 @@ challenges encountered and how they were solved, and the trade-offs made.
 | --- | --- |
 | **Goal** | A professional, commerce-grade search UI over a Coveo index of Pokemon. |
 | **Core requirements** | Facet by **Type**, facet by **Generation**, show each Pokemon's **picture** in results. |
-| **Extended work** | SSR, analytics context, clean data ingestion, type-ahead (ML QS + instant results), Pokemon detail page, **ART** on `pokemon-zikora` pipeline, ML analytics simulation, Relevance Inspector validation, security hardening, RGA plan. |
+| **Extended work** | SSR, analytics context, clean data ingestion, type-ahead (ML QS + instant results), Pokemon detail page, **ART** + **RGA** on `pokemon-zikora` pipeline, ML analytics simulation, verification scripts, **Generated Answer** UI, security hardening. |
 | **Repository** | https://github.com/zikorao/CoveoProject |
 | **Coveo org** | `mrzikora632mb41x` - live traffic uses **`Search pipeline - pokemon-zikora`** (search hub `pokemon-zikora`) |
 
@@ -32,16 +32,18 @@ flowchart TD
         IDX --> SAPI[Search API]
         IDX --> QS[ML Query Suggestions model]
         IDX --> ART[ML ART model]
+        IDX --> RGA[ML RGA model]
         UA[Usage Analytics] --> QS
         UA --> ART
         PIPE[Search pipeline - pokemon-zikora]
         PIPE --> QS
         PIPE --> ART
+        PIPE --> RGA
     end
 
     subgraph "Next.js App (App Router)"
         SC[page.tsx - Server Component<br/>fetchStaticState] --> SP[SearchProvider<br/>hydrateStaticState]
-        SP --> UI[SearchInterface<br/>SearchBox / Facets / ResultList / Pager]
+        SP --> UI[SearchInterface<br/>SearchBox / Facets / RGA / Results / Pager]
         DP[pokemon/[name]/page.tsx<br/>Server Component]
     end
 
@@ -49,6 +51,8 @@ flowchart TD
     UI -->|search / facets / suggestions| SAPI
     UI -->|instant results wildcard| SAPI
     UI -->|query suggest| QS
+    UI -->|generativeQuestionAnsweringId| RGA
+    UI -->|SSE stream answer| RGA
     DP -->|single-doc REST| SAPI
     MW[middleware.ts<br/>visitor cookie] --> SC
     UI -->|search events| UA
@@ -70,6 +74,7 @@ flowchart TD
 
 - **Next.js 14** (App Router) + **React 18** + **TypeScript**
 - **@coveo/headless-react 2.9.16** (the `/ssr` entrypoint)
+- **@coveo/headless 3.50.1** (client `buildGeneratedAnswer` for RGA; bundled with headless-react)
 - **Python 3** (standard library only) for ingestion + analytics simulation
 - **PokeAPI** as the data source
 
@@ -81,13 +86,17 @@ We push clean, structured documents instead of crawling HTML.
 
 - Fetches species **by generation** (1-9) and **types** from PokeAPI.
 - Builds one document per Pokemon (~1025 total) with:
-  - `title` (display name), `type` (multi-value, e.g. `["Grass","Poison"]`),
-    `generation` (1-9), `picture` (official artwork URL),
-    `clickableUri`/`documentId` (`https://pokemondb.net/pokedex/<slug>`).
-- Uploads via the Push API **file-container** flow: request container ->
-  `PUT` payload to the container -> trigger **batch** ingestion.
+  - `title` (display name), `type` (multi-value), `generation` (1-9),
+    `picture` (official artwork URL), `clickableUri`/`documentId`
+    (`https://pokemondb.net/pokedex/<slug>`).
+  - **`description`** - English genus + up to four Pokedex flavor lines (PokeAPI
+    `pokemon-species`) for generative grounding.
+  - **`data` / `body`** - small HTML page (`<h1>`, type, generation, flavor text)
+    so indexed content is rich enough for **RGA** on the push source alone.
+- Uploads via the Push API **file-container** flow, then signals **`IDLE`** so
+  Coveo rebuilds the push source after batch ingest.
 - Reads credentials from env vars (`COVEO_ORG`, `COVEO_SOURCE`, `COVEO_PUSH_KEY`)
-  so no key is stored in the repo. Idempotent / re-runnable.
+  so no key is stored in the repo. Idempotent / re-runnable (~2-3 min for species text).
 
 ---
 
@@ -112,6 +121,10 @@ We push clean, structured documents instead of crawling HTML.
   on Usage Analytics **search** events (`queryText`).
 - **Automatic Relevance Tuning (ART)** model associated with **`Search pipeline -
   pokemon-zikora`**, trained on Usage Analytics **search + click** pairs.
+- **Relevance Generative Answering (RGA)** model associated with the same pipeline
+  and search hub `pokemon-zikora`. Search responses expose
+  `extendedResults.generativeQuestionAnsweringId`; answers stream from
+  `GET /rest/organizations/{org}/machinelearning/streaming/{streamId}`.
 - API key enforces **search hub** `pokemon-zikora` (request `searchHub` params are
   overridden by the token).
 
@@ -129,6 +142,7 @@ We push clean, structured documents instead of crawling HTML.
 | `components/ResultList.tsx` | Product-card grid; links to internal detail pages. |
 | `components/QuerySummary.tsx` | "Showing X-Y of N" result count. |
 | `components/Pager.tsx` | Numbered pagination. |
+| `components/GeneratedAnswer.tsx` | RGA panel: `buildGeneratedAnswer` on hydrated engine; streams answer, citations, feedback. |
 | `app/pokemon/[name]/page.tsx` | Detail page; single-document fetch via Search API. |
 | `lib/navigator-context.ts` | Builds `NavigatorContext` from Next.js headers/cookies. |
 | `middleware.ts` | Sets the stable visitor-id cookie for analytics correlation. |
@@ -142,6 +156,8 @@ We push clean, structured documents instead of crawling HTML.
 - **Product-card grid** with artwork, name, generation badge, and colored type
   chips; hover lift and image zoom.
 - **Query summary** (result count + echoed query) and **pagination**.
+- **Generated answer** (RGA) panel above the result grid when Coveo returns an
+  answer for the current query (Helpful / Not helpful / Regenerate).
 - Responsive layout (sidebar collapses on tablet/mobile).
 
 ---
@@ -272,9 +288,64 @@ the app filters to the push source only, so crawl traffic would add noise.
    **Query pipeline rules and models**.
 5. Review per-result **Boost** column (0 is OK when ART ran but did not promote).
 
+### 9.7 Experiment D - Relevance Generative Answering (RGA)
+
+**Hypothesis:** RGA on **`Search pipeline - pokemon-zikora`** can ground answers on
+push documents when they contain enough textual content, without relying on the
+legacy pokemondb crawl.
+
+**Activities:**
+
+| Step | Action | Finding |
+| --- | --- | --- |
+| 1 | Confirmed RGA model associated on **pokemon-zikora** pipeline (search hub `pokemon-zikora`) | Every search returns `generativeQuestionAnsweringId` in `extendedResults` |
+| 2 | Ran `scripts/test_rga.py` on push-only `cq` after first description push | Stream completes; **`answerGenerated: false`** (sparse `data` text) |
+| 3 | Compared push vs full index (no `cq`) | Crawl (`filetype: html`, ~600+ words) -> **`answerGenerated: true`**; push alone failed |
+| 4 | Enriched push: genus + multiple flavor lines; wrapped `data`/`body` in **HTML** | Re-pushed ~1025 docs; signaled **`statusType=IDLE`** rebuild |
+| 5 | Re-ran `scripts/test_rga.py` after rebuild | **`answerGenerated: true`** on push-only for `pikachu`, `bulbasaur`, `what type is bulbasaur` |
+| 6 | Added `components/GeneratedAnswer.tsx` | UI streams answer via `buildGeneratedAnswer` + `useEngine()` from headless-react SSR |
+
+**Validated queries (push source only):**
+- `pikachu` - Electric type, tail/lightning flavor text; citation **push API solution**
+- `what type is bulbasaur` - Grass/Poison answer with seed-on-back context
+
+**Outcome:** RGA is **live** on the catalog the app searches (constant query to push).
+The storefront shows answers in the **Generated answer** panel when the model
+returns content.
+
 ---
 
-## 10. SSR & analytics
+## 10. RGA in the application
+
+`@coveo/headless-react` SSR 2.9.16 does not expose `defineGeneratedAnswer`, so RGA
+uses the hydrated search engine from headless-react and **`buildGeneratedAnswer`**
+from **`@coveo/headless`** (same version as the SSR bundle: 3.50.1).
+
+**Flow:**
+1. User searches; Search API returns results + `generativeQuestionAnsweringId`.
+2. `GeneratedAnswer` controller subscribes to engine state and opens the ML **SSE**
+   stream for that id.
+3. `components/GeneratedAnswer.tsx` renders loading steps, streamed text, citations,
+   and feedback actions.
+
+**Engine export:** `useEngine` is re-exported from `lib/engine.ts` alongside the
+SSR controller hooks.
+
+**Verification:**
+
+```bash
+export COVEO_ORG=your_org_id
+export COVEO_ACCESS_TOKEN=your_search_token
+python3 scripts/test_rga.py
+python3 scripts/test_rga.py --query "what type is bulbasaur"
+```
+
+Optional `--include-crawl` runs a second scenario without `cq` (includes pokemondb
+crawl) for comparison.
+
+---
+
+## 11. SSR & analytics
 
 - **SSR hydration**: server renders initial results (`fetchStaticState`), client
   hydrates (`hydrateStaticState`) for interactivity - good first paint + SEO,
@@ -284,7 +355,7 @@ the app filters to the push source only, so crawl traffic would add noise.
 
 ---
 
-## 11. Security
+## 12. Security
 
 - Credentials moved from hard-coded values to `NEXT_PUBLIC_COVEO_*` **environment
   variables** (`.env.local`, gitignored; `.env.example` committed as a template).
@@ -294,7 +365,7 @@ the app filters to the push source only, so crawl traffic would add noise.
 
 ---
 
-## 12. Challenges and resolutions
+## 13. Challenges and resolutions
 
 | Challenge | Root cause | Resolution |
 | --- | --- | --- |
@@ -308,7 +379,8 @@ the app filters to the push source only, so crawl traffic would add noise.
 | Type text missing in results | `@type` not "Include in results" in Coveo | Admin toggle (pending); UI renders chips when available |
 | Query Suggestions empty | Cold-start: no analytics data | Simulated search traffic; relies on daily model rebuild |
 | Instant results returned 0 for partial input | Coveo matches whole keywords | Enabled `wildcards` + prefix query (`char*`) |
-| RGA not available in code | `defineGeneratedAnswer` absent in SSR 2.9.16 | Documented upgrade vs client-only paths |
+| RGA not in headless-react SSR | No `defineGeneratedAnswer` in SSR 2.9.16 | Client `buildGeneratedAnswer` on hydrated engine (`GeneratedAnswer.tsx`) |
+| RGA `answerGenerated: false` on push | Plain `data` text too short vs crawl HTML | HTML `data`/`body` + PokeAPI flavor text; push rebuild (`IDLE`) |
 | Secret in public repo | Token hard-coded and committed | Env vars + rotation + history scrub |
 | ART empty in Relevance Inspector | Wrong pipeline (`default` only), strict conditions (Recommendation, IPX), searchHub mismatch | ART on **Search pipeline - pokemon-zikora**; hub-only condition; token hub `pokemon-zikora` |
 | ART QRE always 0 in API | ART runs but no boost on exact/tied queries; simulated clicks | RI confirms execution; Boost 0 acceptable; optional richer clicks |
@@ -317,7 +389,7 @@ the app filters to the push source only, so crawl traffic would add noise.
 
 ---
 
-## 13. Trade-offs
+## 14. Trade-offs
 
 | Decision | Alternative | Why we chose it |
 | --- | --- | --- |
@@ -328,10 +400,11 @@ the app filters to the push source only, so crawl traffic would add noise.
 | **Wildcard prefix for instant results** | Rely on QS-completed queries | Enables true type-ahead before the model matures (trade: slightly looser ranking) |
 | **Direct REST call on detail page** | A second Headless engine instance | Simpler; one focused single-document request |
 | **`NEXT_PUBLIC_` token** | Server-only secret + proxy | Required because the client engine hydrates in the browser; token is search-scoped |
+| **Client `buildGeneratedAnswer`** | Upgrade headless-react for SSR RGA controller | Ships RGA now without a major SSR package bump; uses shared hydrated engine |
 
 ---
 
-## 14. Configuration reference
+## 15. Configuration reference
 
 **App env (`.env.local`)**
 ```
@@ -346,7 +419,7 @@ COVEO_SOURCE=...
 COVEO_PUSH_KEY=...
 ```
 
-**Analytics simulation env (`simulate_searches.py`, `simulate_clicks.py`, `test_art.py`)**
+**Analytics / verification env (`simulate_searches.py`, `simulate_clicks.py`, `test_art.py`, `test_rga.py`)**
 ```
 COVEO_ORG=...
 COVEO_ACCESS_TOKEN=...
@@ -358,28 +431,26 @@ COVEO_ACCESS_TOKEN=...
 - (Pending) `@type` set to "Include in results" for inline chips.
 - QS model on query pipeline; rebuild after `simulate_searches.py`.
 - ART model on **Search pipeline - pokemon-zikora**; condition **Search hub is pokemon-zikora**; rebuild after `simulate_clicks.py`.
-- API key **search hub** matches ART condition.
+- **RGA** model on **Search pipeline - pokemon-zikora**; content includes **push API solution** source.
+- API key **search hub** matches ART/RGA pipeline routing.
+
+**Push source id (example org):** `mrzikora632mb41x-uk6mcizls4f5hgnihkfqjdsej4` (name: push API solution).
 
 ---
 
-## 15. Roadmap / pending
+## 16. Roadmap / pending
 
 - **`@type` displayable**: flip "Include in results" so type chips show in cards.
 - **QS maturation**: more/varied search traffic, then daily rebuild for richer
   prefix suggestions.
 - **ART stronger boosts**: optional targeted click simulation (e.g. query `electric`
   -> electric-type Pokemon) or real user traffic; compare Boost in RI.
-- **ITD**: enable on ART association; enrich push documents with descriptions for `lq` queries.
-- **Relevance Generative Answering (RGA)**:
-  1. Confirm license/entitlement on the org.
-  2. Enable + scope RGA on the `default` pipeline to the push source.
-  3. Enrich documents (descriptions, abilities) so answers have text to ground on.
-  4. Implement the UI via a headless-react upgrade (`defineGeneratedAnswer`) or a
-     client-only `buildGeneratedAnswer` engine.
+- **ITD**: enable on ART association; optional `lq` queries in the UI.
+- **RGA via SSR controller**: upgrade `@coveo/headless-react` when `defineGeneratedAnswer` is available for a single-package SSR pattern.
 
 ---
 
-## 16. How to run
+## 17. How to run
 
 ```bash
 npm install
@@ -398,6 +469,9 @@ Seed analytics for ML models (hub-aligned):
 export COVEO_ORG=... COVEO_ACCESS_TOKEN=...
 python3 scripts/simulate_searches.py   # QS training (~3075 search events)
 python3 scripts/simulate_clicks.py     # ART training (~1025 search+click sessions)
-python3 scripts/test_art.py            # verification checklist + searchUid for RI
+python3 scripts/test_art.py            # ART checklist + searchUid for RI
+python3 scripts/test_rga.py            # RGA stream + answerGenerated on push index
 ```
-Rebuild QS and ART models in Coveo Admin after seeding.
+
+After `push_pokemon.py`, wait for the push source rebuild (or run `statusType=IDLE`).
+Rebuild QS and ART models in Coveo Admin after analytics seeding.
